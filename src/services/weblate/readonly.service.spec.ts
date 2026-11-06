@@ -9,7 +9,50 @@ describe('WeblateReadonlyService', () => {
         WEBLATE_API_URL: 'http://weblate.test',
         WEBLATE_API_TOKEN: 'test-token',
       }),
+      {
+        resolveComponentApiSlug: jest.fn(
+          (_projectSlug: string, componentSlug: string) =>
+            Promise.resolve(componentSlug),
+        ),
+      } as never,
+      {
+        searchUnitsWithFailingChecks: jest.fn().mockResolvedValue([]),
+      } as never,
     );
+
+  it('resolves effective labels from the source unit', async () => {
+    const service = createService();
+    const apiClient = (service as unknown as { apiClient: AxiosInstance })
+      .apiClient;
+    const get = jest.spyOn(apiClient, 'get');
+    get
+      .mockResolvedValueOnce({
+        data: {
+          id: 42,
+          source_unit: 'https://weblate.test/api/units/24/',
+          labels: [],
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          id: 24,
+          labels: [{ id: 7, name: 'Точность: Пропуск' }],
+          explanation: 'MQM: Точность: Пропуск. Причина: пропущен текст.',
+        },
+      });
+
+    await expect(service.getUnitDetails('42')).resolves.toMatchObject({
+      id: 42,
+      labels: [{ id: 7, name: 'Точность: Пропуск' }],
+      unit_labels: [],
+      source_unit_id: '24',
+      source_unit_labels: [{ id: 7, name: 'Точность: Пропуск' }],
+      effective_labels: [{ id: 7, name: 'Точность: Пропуск' }],
+      labels_owner: 'source_unit',
+      source_unit_explanation:
+        'MQM: Точность: Пропуск. Причина: пропущен текст.',
+    });
+  });
 
   it('reads unit comments with pagination', async () => {
     const service = createService();
@@ -51,7 +94,14 @@ describe('WeblateReadonlyService', () => {
         previous: null,
         results: [
           {
-            id: 1,
+            id: 0,
+            unit: null,
+            action_name: 'Repository updated',
+            timestamp: '2025-01-01T00:00:00Z',
+            author: 'system',
+          },
+          {
+            id: 2,
             unit: 'https://weblate.test/api/units/42/',
             action_name: 'Translation changed',
             timestamp: '2025-01-01T00:00:00Z',
@@ -70,7 +120,7 @@ describe('WeblateReadonlyService', () => {
 
     await expect(
       service.getUnitHistory('project', 'component', 'en', '42', 50),
-    ).resolves.toEqual([expect.objectContaining({ id: 1 })]);
+    ).resolves.toEqual([expect.objectContaining({ id: 2 })]);
   });
 
   it('resolves screenshots associated with a unit and their image URL', async () => {
@@ -143,5 +193,131 @@ describe('WeblateReadonlyService', () => {
       '/translations/project/component/en/repository/',
       { params: undefined },
     );
+  });
+
+  it('uses the encoded API slug for nested component details', async () => {
+    const resolveComponentApiSlug = jest
+      .fn()
+      .mockResolvedValue('publichnye-stranicy%2Fglavnaya-stranica');
+    const service = new WeblateReadonlyService(
+      new ConfigService({
+        WEBLATE_API_URL: 'http://weblate.test',
+        WEBLATE_API_TOKEN: 'test-token',
+      }),
+      { resolveComponentApiSlug } as never,
+      {
+        searchUnitsWithFailingChecks: jest.fn().mockResolvedValue([]),
+      } as never,
+    );
+    const apiClient = (service as unknown as { apiClient: AxiosInstance })
+      .apiClient;
+    const get = jest.spyOn(apiClient, 'get').mockResolvedValue({
+      data: { slug: 'glavnaya-stranica' },
+    });
+
+    await service.getComponentDetails('web', 'glavnaya-stranica');
+
+    expect(get).toHaveBeenCalledWith(
+      '/components/web/publichnye-stranicy%252Fglavnaya-stranica/',
+      { params: undefined },
+    );
+  });
+
+  it('resolves failing check IDs and descriptions from read-only Weblate pages', async () => {
+    const service = createService();
+    const apiClient = (service as unknown as { apiClient: AxiosInstance })
+      .apiClient;
+    jest.spyOn(apiClient, 'get').mockResolvedValue({
+      data: {
+        id: 42,
+        has_failing_check: true,
+        web_url:
+          'https://weblate.test/translate/web/glavnaya-stranica/en/?checksum=abc',
+      },
+    });
+    const webClient = (service as unknown as { webClient: AxiosInstance })
+      .webClient;
+    const webGet = jest.spyOn(webClient, 'get');
+    webGet.mockResolvedValueOnce({
+      data: '<a href="/checks/same/web/glavnaya-stranica/en/">Same</a>',
+    });
+    webGet.mockResolvedValueOnce({
+      data: `<div class="list-group-item check check-item">
+        <h5><a href="https://docs.weblate.org/en/latest/user/checks.html#check-same">doc</a><span class="red">!</span>Unchanged translation</h5>
+        <p class="list-group-item-text check-description">Source and translation are identical.</p>
+        <a href="/js/ignore-check/77/">ignore</a>
+      </div>`,
+    });
+    const translationsService = (
+      service as unknown as {
+        translationsService: {
+          searchUnitsWithFailingChecks: jest.Mock;
+        };
+      }
+    ).translationsService;
+    translationsService.searchUnitsWithFailingChecks.mockResolvedValue([
+      { id: 42 },
+    ]);
+
+    await expect(
+      service.getUnitChecks('web', 'glavnaya-stranica', 'en', '42'),
+    ).resolves.toMatchObject({
+      hasFailingCheck: true,
+      discoveredCheckIds: ['same'],
+      detailsAvailable: true,
+      checks: [
+        {
+          checkId: 'same',
+          name: 'Unchanged translation',
+          description: 'Source and translation are identical.',
+          recordId: 77,
+        },
+      ],
+    });
+    expect(
+      translationsService.searchUnitsWithFailingChecks,
+    ).toHaveBeenCalledWith('web', 'glavnaya-stranica', 'en', 'same', 200);
+    expect(webGet).toHaveBeenNthCalledWith(
+      1,
+      '/checks/-/web/glavnaya-stranica/en/',
+      {
+        headers: { Accept: 'text/html' },
+      },
+    );
+    expect(webGet).toHaveBeenNthCalledWith(
+      2,
+      '/translate/web/glavnaya-stranica/en/?checksum=abc',
+      {
+        headers: { Accept: 'text/html' },
+      },
+    );
+  });
+
+  it('returns a controlled limitation when the Weblate UI is unavailable', async () => {
+    const service = createService();
+    const apiClient = (service as unknown as { apiClient: AxiosInstance })
+      .apiClient;
+    jest.spyOn(apiClient, 'get').mockResolvedValue({
+      data: {
+        id: 42,
+        has_failing_check: true,
+        web_url:
+          'https://weblate.test/translate/web/component/en/?checksum=abc',
+      },
+    });
+    const webClient = (service as unknown as { webClient: AxiosInstance })
+      .webClient;
+    jest
+      .spyOn(webClient, 'get')
+      .mockRejectedValue(new Error('503 unavailable'));
+
+    await expect(
+      service.getUnitChecks('web', 'component', 'en', '42'),
+    ).resolves.toMatchObject({
+      hasFailingCheck: true,
+      checks: [],
+      detailsAvailable: false,
+      limitations: [expect.stringContaining('503 unavailable')],
+    });
   });
 });

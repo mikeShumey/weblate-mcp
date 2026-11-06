@@ -135,6 +135,8 @@ For development or local builds:
 | Tool | Description |
 |------|-------------|
 | **`listProjects`** | List all available Weblate projects with URLs and metadata |
+| **`listProjectLabels`** | List project labels with IDs, descriptions, and colors |
+| **`assignLabelToUnit`** *(write, opt-in)* | Change a translation unit by assigning an existing project label and saving an explanation; enable explicitly in `prompt.config` |
 
 ### 🔧 Component Management
 | Tool | Description |
@@ -145,6 +147,7 @@ For development or local builds:
 | Tool | Description |
 |------|-------------|
 | **`searchUnitsWithFilters`** ⭐ | **Efficient search using Weblate's native filtering syntax** |
+| **`searchUnitsWithFailingChecks`** | Find read-only units with failing quality checks |
 | **`searchStringInProject`** | Search for translations containing specific text in a project |
 | **`getTranslationForKey`** | Get translation value for a specific key |
 | **`writeTranslation`** | Update or write translation values with approval support |
@@ -162,6 +165,7 @@ For development or local builds:
 | Tool | Description |
 |------|-------------|
 | **`getUnitDetails`** | Get complete details for one translation unit |
+| **`getUnitChecks`** | Resolve failing quality-check IDs and read-only names/descriptions for one unit |
 | **`getUnitComments`** | Get comments attached to a translation unit |
 | **`getUnitHistory`** | Get history for a translation unit |
 | **`getChangeDetails`** | Get details for one translation change |
@@ -183,7 +187,19 @@ The `searchUnitsWithFilters` tool uses Weblate's native filtering syntax, making
 - `state:=0` - Find untranslated strings
 - `state:=10` - Find strings that need editing
 - `source:"login"` - Find strings containing "login"
+- `has:check` - Find strings with any failing quality check
+- `check:newline-count` - Find strings with one specific failing check
 - `component:common AND state:=0` - Complex filters
+
+`searchUnitsWithFailingChecks` is a read-only convenience tool for the two
+quality-check queries above. Use the public component slug, including for
+components nested inside a Weblate category; the server resolves nested API
+paths internally.
+
+`getUnitChecks` combines the unit API flag, Weblate's read-only quality-check
+search, and the Weblate UI pages to return check IDs and descriptions. The
+result includes `limitations` and never treats unavailable UI data as a
+confirmed check description.
 
 ### 🌐 Language Management
 | Tool | Description |

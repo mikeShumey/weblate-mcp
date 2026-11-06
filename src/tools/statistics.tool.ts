@@ -4,6 +4,50 @@ import { z } from 'zod';
 import { WeblateApiService } from '../services';
 import { WeblateStatisticsService } from '../services/weblate/statistics.service';
 
+type DerivedUntranslatedStatistics = {
+  count: number | string;
+  percent: number | string;
+};
+
+type DerivedNeedsReviewStatistics = {
+  count: number | string;
+  percent: number | string;
+};
+
+function deriveUntranslatedStatistics(
+  stats: any,
+): DerivedUntranslatedStatistics {
+  const total = stats?.total;
+  const translated = stats?.translated;
+  const count =
+    typeof stats?.nottranslated === 'number'
+      ? stats.nottranslated
+      : typeof total === 'number' && typeof translated === 'number'
+        ? Math.max(total - translated, 0)
+        : 'N/A';
+  const percent =
+    typeof stats?.nottranslated_percent === 'number'
+      ? stats.nottranslated_percent
+      : typeof count === 'number' && typeof total === 'number' && total > 0
+        ? (count / total) * 100
+        : 'N/A';
+
+  return { count, percent };
+}
+
+function deriveNeedsReviewStatistics(stats: any): DerivedNeedsReviewStatistics {
+  const total = stats?.total;
+  const count = typeof stats?.fuzzy === 'number' ? stats.fuzzy : 'N/A';
+  const percent =
+    typeof stats?.fuzzy_percent === 'number'
+      ? stats.fuzzy_percent
+      : typeof count === 'number' && typeof total === 'number' && total > 0
+        ? (count / total) * 100
+        : 'N/A';
+
+  return { count, percent };
+}
+
 @Injectable()
 export class WeblateStatisticsTool {
   private readonly logger = new Logger(WeblateStatisticsTool.name);
@@ -48,7 +92,8 @@ export class WeblateStatisticsTool {
 
   @Tool({
     name: 'getComponentStatistics',
-    description: 'Get detailed statistics for a specific component',
+    description:
+      'Get aggregate statistics for a component across its languages. Use getTranslationStatistics for one target language.',
     parameters: z.object({
       projectSlug: z.string().describe('The slug of the project'),
       componentSlug: z.string().describe('The slug of the component'),
@@ -289,24 +334,27 @@ export class WeblateStatisticsTool {
     const formatPercent = (value: any) => {
       return typeof value === 'number' ? `${value.toFixed(1)}%` : 'N/A';
     };
+    const untranslated = deriveUntranslatedStatistics(stats);
+    const needsReview = deriveNeedsReviewStatistics(stats);
 
     return `## 📊 Project Statistics: ${stats?.name || projectSlug}
 
 **Overall Progress:**
 - 🎯 Translation Progress: ${formatPercent(getStatValue('translated_percent'))}
 - ✅ Approved: ${formatPercent(getStatValue('approved_percent'))}
-- 🔍 Needs Review: ${formatPercent(getStatValue('readonly_percent'))}
-- ❌ Untranslated: ${formatPercent(getStatValue('nottranslated_percent'))}
+- 🔍 Needs Review: ${formatPercent(needsReview.percent)}
+- ❌ Untranslated: ${formatPercent(untranslated.percent)}
 
 **String Counts:**
 - 📝 Total Strings: ${getStatValue('total')}
 - ✅ Translated: ${getStatValue('translated')}
 - 🎯 Approved: ${getStatValue('approved')}
-- ❌ Untranslated: ${getStatValue('nottranslated')}
+- ❌ Untranslated: ${untranslated.count}
+- 🔍 Needs Review: ${needsReview.count}
 - 🔍 Read-only: ${getStatValue('readonly')}
 
 **Project Details:**
-- 🌐 URL: ${stats?.web_url || 'N/A'}
+- 🌐 URL: ${stats?.web_url || stats?.url || 'N/A'}
 - 🔗 Repository: ${stats?.repository_url || 'N/A'}`;
   }
 
@@ -318,6 +366,8 @@ export class WeblateStatisticsTool {
     const formatPercent = (value: any) => {
       return typeof value === 'number' ? `${value.toFixed(1)}%` : 'N/A';
     };
+    const untranslated = deriveUntranslatedStatistics(stats);
+    const needsReview = deriveNeedsReviewStatistics(stats);
 
     return `## 📊 Component Statistics: ${stats?.name || componentSlug}
 
@@ -327,14 +377,15 @@ export class WeblateStatisticsTool {
 **Translation Progress:**
 - 🎯 Translated: ${formatPercent(getStatValue('translated_percent'))}
 - ✅ Approved: ${formatPercent(getStatValue('approved_percent'))}
-- 🔍 Needs Review: ${formatPercent(getStatValue('readonly_percent'))}
-- ❌ Untranslated: ${formatPercent(getStatValue('nottranslated_percent'))}
+- 🔍 Needs Review: ${formatPercent(needsReview.percent)}
+- ❌ Untranslated: ${formatPercent(untranslated.percent)}
 
 **String Counts:**
 - 📝 Total: ${getStatValue('total')}
 - ✅ Translated: ${getStatValue('translated')}
 - 🎯 Approved: ${getStatValue('approved')}
-- ❌ Untranslated: ${getStatValue('nottranslated')}
+- ❌ Untranslated: ${untranslated.count}
+- 🔍 Needs Review: ${needsReview.count}
 
 **Component Details:**
 - 🌐 URL: ${stats?.web_url || 'N/A'}
@@ -354,6 +405,8 @@ export class WeblateStatisticsTool {
     const formatPercent = (value: any) => {
       return typeof value === 'number' ? `${value.toFixed(1)}%` : 'N/A';
     };
+    const untranslated = deriveUntranslatedStatistics(stats);
+    const needsReview = deriveNeedsReviewStatistics(stats);
 
     return `## 📊 Translation Statistics
 
@@ -362,14 +415,15 @@ export class WeblateStatisticsTool {
 **Progress:**
 - 🎯 Translated: ${formatPercent(getStatValue('translated_percent'))}
 - ✅ Approved: ${formatPercent(getStatValue('approved_percent'))}
-- 🔍 Needs Review: ${formatPercent(getStatValue('readonly_percent'))}
-- ❌ Untranslated: ${formatPercent(getStatValue('nottranslated_percent'))}
+- 🔍 Needs Review: ${formatPercent(needsReview.percent)}
+- ❌ Untranslated: ${formatPercent(untranslated.percent)}
 
 **String Details:**
 - 📝 Total Strings: ${getStatValue('total')}
 - ✅ Translated: ${getStatValue('translated')}
 - 🎯 Approved: ${getStatValue('approved')}
-- ❌ Untranslated: ${getStatValue('nottranslated')}
+- ❌ Untranslated: ${untranslated.count}
+- 🔍 Needs Review: ${needsReview.count}
 - 🔍 Readonly: ${getStatValue('readonly')}
 
 **Quality Metrics:**
@@ -450,24 +504,25 @@ ${progressBar} ${formatPercent(stats.translated_percent)}
     const formatPercent = (value: any) => {
       return typeof value === 'number' ? `${value.toFixed(1)}%` : 'N/A';
     };
+    const untranslated = deriveUntranslatedStatistics(stats);
 
     return `## 🌐 Language Statistics: ${stats?.name || languageCode}
 
 **Language Details:**
 - 📛 Name: ${getStatValue('name')}
-- 🔤 Code: ${getStatValue('code')}
+- 🔤 Code: ${stats?.code || languageCode}
 - 📍 Direction: ${getStatValue('direction', 'ltr')}
 
 **Overall Progress:**
 - 🎯 Translated: ${formatPercent(getStatValue('translated_percent'))}
 - ✅ Approved: ${formatPercent(getStatValue('approved_percent'))}
-- ❌ Untranslated: ${formatPercent(getStatValue('nottranslated_percent'))}
+- ❌ Untranslated: ${formatPercent(untranslated.percent)}
 
 **String Counts:**
 - 📝 Total: ${getStatValue('total')}
 - ✅ Translated: ${getStatValue('translated')}
 - 🎯 Approved: ${getStatValue('approved')}
-- ❌ Untranslated: ${getStatValue('nottranslated')}`;
+- ❌ Untranslated: ${untranslated.count}`;
   }
 
   private formatUserStatistics(username: string, stats: any): string {
@@ -499,4 +554,4 @@ ${progressBar} ${formatPercent(stats.translated_percent)}
     const empty = Math.max(0, width - filled);
     return `[${'█'.repeat(filled)}${'░'.repeat(empty)}]`;
   }
-} 
+}

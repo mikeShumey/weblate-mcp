@@ -72,6 +72,115 @@ Get detailed information about a specific project.
 }
 ```
 
+### `listProjectLabels`
+
+List the labels available in a Weblate project. This is a read-only operation.
+
+**Parameters:**
+- `projectSlug` (string, required): Project slug identifier
+
+**Returns:** JSON text containing the project slug and labels with `id`, `name`, `description`, and `color`.
+
+**Example:**
+```json
+{
+  "name": "listProjectLabels",
+  "arguments": {
+    "projectSlug": "myproject"
+  }
+}
+```
+
+**Example response:**
+```json
+{
+  "projectSlug": "myproject",
+  "labels": [
+    {
+      "id": 7,
+      "name": "Needs review",
+      "description": "Requires translator review",
+      "color": "orange"
+    }
+  ]
+}
+```
+
+### `assignLabelToUnit`
+
+**Write action:** assign an existing project label to the source unit. This changes Weblate data and should be enabled explicitly in `prompt.config`; the tool does not create labels or comments.
+
+**Parameters:**
+- `projectSlug` (string, required): Project slug identifier
+- `componentSlug` (string, required): Component slug identifier
+- `languageCode` (string, required): Translation language code
+- `key` (string, required): Translation unit key/context
+- `labelId` (number, required): ID of an existing label belonging to the project
+
+**Returns:** JSON text with the unit scope, assigned label, and final label list.
+
+**Example:**
+```json
+{
+  "name": "assignLabelToUnit",
+  "arguments": {
+    "projectSlug": "myproject",
+    "componentSlug": "web",
+    "languageCode": "ru",
+    "key": "homepage.title",
+    "labelId": 7
+  }
+}
+```
+
+**Example response:**
+```json
+{
+  "projectSlug": "myproject",
+  "componentSlug": "web",
+  "languageCode": "ru",
+  "key": "homepage.title",
+  "updatedUnitId": "24",
+  "labelsOwner": "source_unit",
+  "verified": true,
+  "assignedLabel": {
+    "id": 7,
+    "name": "Needs review"
+  },
+  "labels": [
+    {
+      "id": 7,
+      "name": "Needs review"
+    }
+  ]
+}
+```
+
+### `addUnitComment`
+
+**Write action:** add a real comment to the target translation unit. Use this after `assignLabelToUnit` for a short MQM reason; it does not write Weblate's Additional explanation field. This changes Weblate data and should be enabled explicitly in `prompt.config`.
+
+**Parameters:**
+- `projectSlug` (string, required): Project slug identifier
+- `componentSlug` (string, required): Component slug identifier
+- `languageCode` (string, required): Translation language code
+- `key` (string, required): Translation unit key/context
+- `comment` (string, required): Short comment for the target translation unit
+
+**Example:**
+```json
+{
+  "name": "addUnitComment",
+  "arguments": {
+    "projectSlug": "myproject",
+    "componentSlug": "web",
+    "languageCode": "ru",
+    "key": "homepage.title",
+    "comment": "MQM: Needs review. Причина: target искажает смысл source."
+  }
+}
+```
+
 ### `create_project`
 
 Create a new project in Weblate.
@@ -203,6 +312,8 @@ Search translation units using Weblate's powerful filtering syntax. This is the 
 - `source:"login"` - Find strings containing "login" in source text
 - `target:"bonjour"` - Find strings containing "bonjour" in target text
 - `has:suggestion` - Find strings with suggestions
+- `has:check` - Find strings with any failing quality check
+- `check:newline-count` - Find strings with one specific failing check
 - `component:common AND state:=0` - Complex queries with multiple filters
 
 **Returns:**
@@ -227,6 +338,16 @@ Search translation units using Weblate's powerful filtering syntax. This is the 
   }
 }
 ```
+
+### `searchUnitsWithFailingChecks`
+
+Read-only convenience search for translation units with failing Weblate
+quality checks. Omit `checkId` to use `has:check`, or provide a Weblate check
+identifier such as `newline-count` to use `check:newline-count`.
+
+The `componentSlug` argument is the public component slug. Nested category
+paths are resolved internally and must not be passed as double-encoded API
+paths.
 
 ### `searchStringInProject`
 
@@ -306,10 +427,29 @@ All tools in this section are read-only.
 ### Unit context
 
 - `getUnitDetails` — complete unit data by `unitId`.
+- `getUnitChecks` — failing quality-check IDs and read-only names/descriptions for one unit; reports UI/API limitations explicitly.
 - `getUnitComments` — comments by `unitId`, with `page` and `pageSize`.
 - `getUnitHistory` — changes for a unit within `projectSlug`, `componentSlug`, and `languageCode`.
 - `getUnitScreenshots` — screenshots associated with a unit, including image URLs.
 - `listTranslationUnits` — paginated units for an exact project/component/language scope.
+
+### `getUnitChecks`
+
+Get read-only quality-check information for one translation unit. The tool
+uses the unit API, Weblate's check search, and the read-only Weblate UI page
+because the REST unit representation exposes `has_failing_check` but not the
+individual check descriptions.
+
+**Parameters:**
+- `projectSlug` (string, required)
+- `componentSlug` (string, required)
+- `languageCode` (string, required)
+- `unitId` (string, required)
+
+**Returns:** `unitId`, requested scope, `hasFailingCheck`, discovered check IDs,
+parsed check metadata, `detailsAvailable`, and `limitations`. If the Weblate
+UI cannot be read, the tool returns a controlled limitation instead of
+inventing check details.
 
 ### Project and translation context
 

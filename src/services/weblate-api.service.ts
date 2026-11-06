@@ -7,6 +7,11 @@ import {
   WeblateChangesService,
   WeblateMemoryService,
   WeblateReadonlyService,
+  type AddUnitCommentResult,
+  type AssignLabelToUnitResult,
+  type ProjectLabel,
+  type SetTranslationStateResult,
+  type WritableTranslationState,
 } from './weblate';
 import {
   type Project,
@@ -24,6 +29,8 @@ import {
   type WeblateRepositoryStatus,
   type WeblateScreenshot,
   type WeblateTranslationMemoryEntry,
+  type WeblateUnitChecksResult,
+  type WeblateUnitDetails,
 } from '../types';
 
 @Injectable()
@@ -45,6 +52,51 @@ export class WeblateApiService {
 
   async getProject(projectSlug: string): Promise<Project> {
     return this.projectsService.getProject(projectSlug);
+  }
+
+  async listProjectLabels(projectSlug: string): Promise<ProjectLabel[]> {
+    return this.projectsService.listProjectLabels(projectSlug);
+  }
+
+  async assignLabelToUnit(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    key: string,
+    labelId: number,
+  ): Promise<AssignLabelToUnitResult> {
+    const labels = await this.projectsService.listProjectLabels(projectSlug);
+    const label = labels.find(({ id }) => id === labelId);
+
+    if (!label) {
+      throw new Error(
+        `Метка с ID ${labelId} не найдена в проекте ${projectSlug}`,
+      );
+    }
+
+    return this.translationsService.assignLabelToUnit(
+      projectSlug,
+      componentSlug,
+      languageCode,
+      key,
+      label,
+    );
+  }
+
+  async addUnitComment(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    key: string,
+    comment: string,
+  ): Promise<AddUnitCommentResult> {
+    return this.translationsService.addUnitComment(
+      projectSlug,
+      componentSlug,
+      languageCode,
+      key,
+      comment,
+    );
   }
 
   // Component methods
@@ -122,6 +174,22 @@ export class WeblateApiService {
       key,
       value,
       markAsApproved,
+    );
+  }
+
+  async setTranslationState(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    key: string,
+    state: WritableTranslationState,
+  ): Promise<SetTranslationStateResult> {
+    return this.translationsService.setTranslationState(
+      projectSlug,
+      componentSlug,
+      languageCode,
+      key,
+      state,
     );
   }
 
@@ -239,6 +307,22 @@ export class WeblateApiService {
     );
   }
 
+  async searchUnitsWithFailingChecks(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    checkId?: string,
+    limit = 50,
+  ): Promise<Unit[]> {
+    return this.translationsService.searchUnitsWithFailingChecks(
+      projectSlug,
+      componentSlug,
+      languageCode,
+      checkId,
+      limit,
+    );
+  }
+
   // Translation Memory methods
   async lookupTranslationMemory(
     sourceLanguage: string,
@@ -256,8 +340,22 @@ export class WeblateApiService {
     );
   }
 
-  async getUnitDetails(unitId: string): Promise<Unit> {
+  async getUnitDetails(unitId: string): Promise<WeblateUnitDetails> {
     return this.readonlyService.getUnitDetails(unitId);
+  }
+
+  async getUnitChecks(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    unitId: string,
+  ): Promise<WeblateUnitChecksResult> {
+    return this.readonlyService.getUnitChecks(
+      projectSlug,
+      componentSlug,
+      languageCode,
+      unitId,
+    );
   }
 
   async getUnitComments(

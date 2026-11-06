@@ -66,7 +66,12 @@ The MCP server provides comprehensive tools for interacting with Weblate:
 
 ### Project Management
 - `listProjects` - List all available Weblate projects
+- `listProjectLabels` - List labels available in a specific Weblate project
 - Comprehensive project information with URLs and metadata
+
+Optional write tool:
+- `assignLabelToUnit` - **Changes data** by assigning an existing project label to the source unit; enable explicitly in `prompt.config`
+- `addUnitComment` - **Changes data** by adding a real comment to the target translation unit; use after `assignLabelToUnit` for the MQM reason
 
 ### Component Management
 - `listComponents` - List components in a specific project
@@ -74,6 +79,7 @@ The MCP server provides comprehensive tools for interacting with Weblate:
 
 ### Translation Management
 - `searchUnitsWithFilters` ⭐ - **Efficient search using Weblate's native filtering syntax**
+- `searchUnitsWithFailingChecks` - Read-only search for units with failing quality checks
 - `searchStringInProject` - Search for translations containing specific text
 - `getTranslationForKey` - Get translation value for a specific key
 - `writeTranslation` - Update or write translation values with approval support
@@ -87,6 +93,7 @@ The MCP server provides comprehensive tools for interacting with Weblate:
 
 ### Translation Case Context (read-only)
 - `getUnitDetails` - Get complete details for one translation unit
+- `getUnitChecks` - Resolve failing quality-check IDs and read-only descriptions for one unit
 - `getUnitComments` - Get comments attached to a translation unit
 - `getUnitHistory` - Get history for a translation unit
 - `getChangeDetails` - Get details for one translation change

@@ -36,7 +36,7 @@ export class WeblateReadonlyTool {
   @Tool({
     name: 'getUnitDetails',
     description:
-      'Get complete read-only details for a Weblate translation unit',
+      'Get complete read-only details for a Weblate translation unit. For translated units, labels are stored on the source unit; the response includes effective_labels, source_unit_id, source_unit_labels, and labels_owner.',
     parameters: z.object({
       unitId: z.string().trim().min(1).describe('Weblate translation unit ID'),
     }),
@@ -45,6 +45,36 @@ export class WeblateReadonlyTool {
     return this.execute('get unit details', async () => {
       const unit = await this.weblateApiService.getUnitDetails(unitId);
       return this.jsonResult(`Translation unit ${unitId}`, unit);
+    });
+  }
+
+  @Tool({
+    name: 'getUnitChecks',
+    description:
+      'Get read-only quality check IDs and details for one Weblate translation unit. Details are reported as unavailable when the Weblate UI cannot be read.',
+    parameters: translationScopeSchema.extend({
+      unitId: z.string().trim().min(1).describe('Weblate translation unit ID'),
+    }),
+  })
+  async getUnitChecks({
+    projectSlug,
+    componentSlug,
+    languageCode,
+    unitId,
+  }: {
+    projectSlug: string;
+    componentSlug: string;
+    languageCode: string;
+    unitId: string;
+  }) {
+    return this.execute('get unit checks', async () => {
+      const checks = await this.weblateApiService.getUnitChecks(
+        projectSlug,
+        componentSlug,
+        languageCode,
+        unitId,
+      );
+      return this.jsonResult(`Quality checks for unit ${unitId}`, checks);
     });
   }
 

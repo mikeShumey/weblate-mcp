@@ -1,7 +1,81 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { WeblateClientService } from '../weblate-client.service';
-import { unitsList, unitsPartialUpdate, translationsUnitsRetrieve, type Unit, type PaginatedUnitList, type UnitsListData, type TranslationsUnitsRetrieveData } from '../../client';
-import { SearchIn } from '../../types';
+import {
+  translationsUnitsRetrieve,
+  unitsList,
+  unitsPartialUpdate,
+  unitsRetrieve,
+  type PaginatedUnitList,
+  type StateEnum,
+  type TranslationsUnitsRetrieveData,
+  type Unit,
+  type UnitFlatLabels,
+  type UnitsListData,
+} from '../../client';
+import { type SearchIn, type WeblateComment } from '../../types';
+
+export type WritableTranslationState = Exclude<StateEnum, 100>;
+
+export type SetTranslationStateResult = {
+  unit: Unit;
+  previousState: StateEnum | undefined;
+  requestedState: WritableTranslationState;
+  verifiedState: StateEnum | undefined;
+  verified: boolean;
+  textUnchanged: boolean;
+  verificationError?: string;
+};
+
+export type AssignLabelToUnitResult = {
+  projectSlug: string;
+  componentSlug: string;
+  languageCode: string;
+  key: string;
+  requestedUnitId: string;
+  updatedUnitId: string;
+  sourceUnitId: string | null;
+  labelsOwner: 'requested_unit' | 'source_unit';
+  assignedLabel: UnitFlatLabels;
+  labels: UnitFlatLabels[];
+  verified: boolean;
+  verificationError?: string;
+};
+
+export type AddUnitCommentResult = {
+  projectSlug: string;
+  componentSlug: string;
+  languageCode: string;
+  key: string;
+  unitId: string;
+  scope: 'translation';
+  comment: string;
+  commentId: number | null;
+};
+
+function mergeUnitLabels(
+  currentLabels: readonly UnitFlatLabels[],
+  label: UnitFlatLabels,
+): UnitFlatLabels[] {
+  const labelsById = new Map<number, UnitFlatLabels>();
+  for (const currentLabel of currentLabels) {
+    labelsById.set(currentLabel.id, currentLabel);
+  }
+  labelsById.set(label.id, label);
+  return [...labelsById.values()];
+}
+
+function extractUnitId(unitUrl: string | undefined): string | null {
+  if (!unitUrl) {
+    return null;
+  }
+
+  const match = unitUrl.match(/\/units\/(\d+)\/?$/);
+  return match?.[1] ?? null;
+}
+
+function searchValue(value: string): string {
+  return /\s/.test(value) ? `"${value.replace(/(["\\])/g, '\\$1')}"` : value;
+}
 
 @Injectable()
 export class WeblateTranslationsService {
@@ -16,10 +90,15 @@ export class WeblateTranslationsService {
     query?: string,
     source?: string,
     target?: string,
-  ): Promise<{ results: Unit[]; count: number; next?: string; previous?: string }> {
+  ): Promise<{
+    results: Unit[];
+    count: number;
+    next?: string;
+    previous?: string;
+  }> {
     try {
       const client = this.weblateClientService.getClient();
-      
+
       // Build search query
       const q_parts = [];
       if (query) {
@@ -31,22 +110,27 @@ export class WeblateTranslationsService {
       if (target) {
         q_parts.push(`target:"${target}"`);
       }
-      
+
       // Add project filter
       q_parts.push(`project:${projectSlug}`);
-      
+
       // Add component filter if specified
       if (componentSlug) {
-        q_parts.push(`component:${componentSlug}`);
+        // Search uses the public component slug. The API path for a nested
+        // component is encoded differently (for example, category%252Fslug)
+        // and must not be used in Weblate's q syntax.
+        q_parts.push(`component:${searchValue(componentSlug)}`);
       }
-      
+
       // Add language filter if specified
       if (languageCode) {
         q_parts.push(`language:${languageCode}`);
       }
 
       // Use the generated SDK with extended types to include the missing 'q' parameter
-      const options: UnitsListData & { query?: { q?: string; page_size?: number } } = {
+      const options: UnitsListData & {
+        query?: { q?: string; page_size?: number };
+      } = {
         url: '/units/',
         query: {
           page_size: 1000,
@@ -61,13 +145,13 @@ export class WeblateTranslationsService {
         client,
         ...options,
       });
-      
+
       if (response.error) {
         throw new Error(`API error: ${JSON.stringify(response.error)}`);
       }
-      
+
       const data = response.data as PaginatedUnitList;
-      
+
       return {
         results: data.results || [],
         count: data.count || 0,
@@ -139,8 +223,8 @@ export class WeblateTranslationsService {
 
       // Remove duplicates based on unit ID
       const uniqueResults = results.filter(
-        (unit, index, self) => 
-          index === self.findIndex(u => u.id === unit.id)
+        (unit, index, self) =>
+          index === self.findIndex((u) => u.id === unit.id),
       );
 
       return uniqueResults;
@@ -149,9 +233,7 @@ export class WeblateTranslationsService {
         `Failed to search string in project ${projectSlug}`,
         error,
       );
-      throw new Error(
-        `Failed to search string in project: ${error.message}`,
-      );
+      throw new Error(`Failed to search string in project: ${error.message}`);
     }
   }
 
@@ -177,10 +259,14 @@ export class WeblateTranslationsService {
       }
 
       const client = this.weblateClientService.getClient();
-      
+
       // Parse plural forms correctly for the target field using language-specific rules
-      const targetArray = this.parsePluralForms(value, unit.source, languageCode);
-      
+      const targetArray = this.parsePluralForms(
+        value,
+        unit.source,
+        languageCode,
+      );
+
       // Update the translation using the units API
       const response = await unitsPartialUpdate({
         client,
@@ -191,11 +277,277 @@ export class WeblateTranslationsService {
         },
       });
 
-      return response.data as Unit;
+      return response.data as unknown as Unit;
     } catch (error) {
       this.logger.error(`Failed to write translation for key ${key}`, error);
       throw new Error(
         `Failed to write translation for key ${key}: ${error.message}`,
+      );
+    }
+  }
+
+  async setTranslationState(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    key: string,
+    state: WritableTranslationState,
+  ): Promise<SetTranslationStateResult> {
+    try {
+      const unit = await this.getTranslationByKey(
+        projectSlug,
+        componentSlug,
+        languageCode,
+        key,
+      );
+
+      if (!unit || !unit.id) {
+        throw new Error(`Translation unit not found for key "${key}"`);
+      }
+
+      const client = this.weblateClientService.getClient();
+      const response = await unitsPartialUpdate({
+        client,
+        path: { id: unit.id.toString() },
+        body: {
+          state,
+          target: unit.target ?? [],
+        },
+      });
+
+      if (response.error) {
+        throw new Error(`API error: ${JSON.stringify(response.error)}`);
+      }
+
+      const responseUnit = response.data as unknown as Partial<Unit> | null;
+      let verifiedUnit: Unit | null = null;
+      let verificationError: string | undefined;
+
+      try {
+        const verificationResponse = await unitsRetrieve({
+          client,
+          path: { id: unit.id.toString() },
+        });
+
+        if (verificationResponse.error || !verificationResponse.data) {
+          throw new Error(
+            `API error: ${JSON.stringify(verificationResponse.error)}`,
+          );
+        }
+
+        verifiedUnit = verificationResponse.data as Unit;
+      } catch (error) {
+        verificationError =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `State update succeeded but read-after-write verification failed for unit ${unit.id}: ${verificationError}`,
+        );
+      }
+
+      const fallbackUnit: Unit = {
+        ...unit,
+        state: responseUnit?.state ?? state,
+        target: unit.target ?? [],
+      };
+      const finalUnit = verifiedUnit ?? fallbackUnit;
+      const textUnchanged =
+        JSON.stringify(finalUnit.source ?? []) ===
+          JSON.stringify(unit.source ?? []) &&
+        JSON.stringify(finalUnit.target ?? []) ===
+          JSON.stringify(unit.target ?? []);
+      const verified =
+        verifiedUnit !== null && verifiedUnit.state === state && textUnchanged;
+
+      return {
+        unit: finalUnit,
+        previousState: unit.state,
+        requestedState: state,
+        verifiedState: finalUnit.state,
+        verified,
+        textUnchanged,
+        ...(verificationError ? { verificationError } : {}),
+      };
+    } catch (error) {
+      this.logger.error(
+        `Failed to set state for translation key ${key}`,
+        error,
+      );
+      throw new Error(
+        `Failed to set state for translation key ${key}: ${error.message}`,
+      );
+    }
+  }
+
+  async assignLabelToUnit(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    key: string,
+    label: UnitFlatLabels,
+  ): Promise<AssignLabelToUnitResult> {
+    try {
+      const unit = await this.getTranslationByKey(
+        projectSlug,
+        componentSlug,
+        languageCode,
+        key,
+      );
+
+      if (!unit || !unit.id) {
+        throw new Error(
+          `Юнит перевода с ключом "${key}" не найден в ${projectSlug}/${componentSlug}/${languageCode}`,
+        );
+      }
+
+      const client = this.weblateClientService.getClient();
+      let updateUnit = unit;
+      const sourceUnitId = extractUnitId(unit.source_unit);
+
+      if (sourceUnitId && sourceUnitId !== unit.id.toString()) {
+        const sourceResponse = await unitsRetrieve({
+          client,
+          path: { id: sourceUnitId },
+        });
+
+        if (sourceResponse.error || !sourceResponse.data) {
+          throw new Error(
+            `Не удалось получить source-юнит ${sourceUnitId}: ${JSON.stringify(sourceResponse.error)}`,
+          );
+        }
+
+        updateUnit = sourceResponse.data as Unit;
+      }
+
+      const labels = mergeUnitLabels(updateUnit.labels ?? [], label);
+      const response = await unitsPartialUpdate({
+        client,
+        path: { id: updateUnit.id.toString() },
+        body: {
+          labels: labels.map(({ id }) => id),
+        },
+      });
+
+      if (response.error) {
+        throw new Error(
+          `Ошибка API Weblate: ${JSON.stringify(response.error)}`,
+        );
+      }
+
+      let finalLabels = labels;
+      let verified = false;
+      let verificationError: string | undefined;
+
+      try {
+        const verificationResponse = await unitsRetrieve({
+          client,
+          path: { id: updateUnit.id.toString() },
+        });
+
+        if (verificationResponse.error || !verificationResponse.data) {
+          throw new Error(
+            `API error: ${JSON.stringify(verificationResponse.error)}`,
+          );
+        }
+
+        const verifiedUnit = verificationResponse.data as Unit;
+        finalLabels = verifiedUnit.labels ?? [];
+        verified = finalLabels.some(({ id }) => id === label.id);
+      } catch (error) {
+        verificationError =
+          error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Метка записана, но read-after-write проверка не выполнена для юнита ${updateUnit.id}: ${verificationError}`,
+        );
+      }
+
+      return {
+        projectSlug,
+        componentSlug,
+        languageCode,
+        key,
+        requestedUnitId: unit.id.toString(),
+        updatedUnitId: updateUnit.id.toString(),
+        sourceUnitId,
+        labelsOwner: sourceUnitId ? 'source_unit' : 'requested_unit',
+        assignedLabel: label,
+        labels: finalLabels,
+        verified,
+        ...(verificationError ? { verificationError } : {}),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Не удалось назначить метку юниту с ключом "${key}"`,
+        error,
+      );
+      throw new Error(
+        `Не удалось назначить метку юниту с ключом "${key}": ${message}`,
+      );
+    }
+  }
+
+  async addUnitComment(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    key: string,
+    comment: string,
+  ): Promise<AddUnitCommentResult> {
+    try {
+      const unit = await this.getTranslationByKey(
+        projectSlug,
+        componentSlug,
+        languageCode,
+        key,
+      );
+
+      if (!unit || !unit.id) {
+        throw new Error(
+          `Юнит перевода с ключом "${key}" не найден в ${projectSlug}/${componentSlug}/${languageCode}`,
+        );
+      }
+
+      const selectedComment = comment.trim();
+      if (!selectedComment) {
+        throw new Error('Комментарий не может быть пустым');
+      }
+
+      const client = this.weblateClientService.getClient();
+      const response = await client.request({
+        method: 'POST',
+        url: '/units/{id}/comments/',
+        path: { id: unit.id.toString() },
+        body: {
+          comment: selectedComment,
+          scope: 'translation',
+        },
+      });
+
+      if (response.error) {
+        throw new Error(
+          `Ошибка API Weblate: ${JSON.stringify(response.error)}`,
+        );
+      }
+
+      const responseData = response.data as Partial<WeblateComment> | null;
+      return {
+        projectSlug,
+        componentSlug,
+        languageCode,
+        key,
+        unitId: unit.id.toString(),
+        scope: 'translation',
+        comment: responseData?.comment ?? selectedComment,
+        commentId: responseData?.id ?? null,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Не удалось добавить комментарий к юниту с ключом "${key}"`,
+        error,
+      );
+      throw new Error(
+        `Не удалось добавить комментарий к юниту с ключом "${key}": ${message}`,
       );
     }
   }
@@ -224,7 +576,9 @@ export class WeblateTranslationsService {
     const successful: Array<{ key: string; unit: Unit }> = [];
     const failed: Array<{ key: string; error: string }> = [];
 
-    this.logger.log(`Starting bulk update of ${translations.length} translations for ${projectSlug}/${componentSlug}/${languageCode}`);
+    this.logger.log(
+      `Starting bulk update of ${translations.length} translations for ${projectSlug}/${componentSlug}/${languageCode}`,
+    );
 
     // Process translations in parallel (but with some concurrency control)
     const concurrencyLimit = 5; // Limit concurrent requests to avoid overwhelming the API
@@ -234,28 +588,34 @@ export class WeblateTranslationsService {
     }
 
     for (const chunk of chunks) {
-      const promises = chunk.map(async ({ key, value, markAsApproved = false }) => {
-        try {
-          const updatedUnit = await this.writeTranslation(
-            projectSlug,
-            componentSlug,
-            languageCode,
-            key,
-            value,
-            markAsApproved,
-          );
+      const promises = chunk.map(
+        async ({ key, value, markAsApproved = false }) => {
+          try {
+            const updatedUnit = await this.writeTranslation(
+              projectSlug,
+              componentSlug,
+              languageCode,
+              key,
+              value,
+              markAsApproved,
+            );
 
-          if (updatedUnit) {
-            successful.push({ key, unit: updatedUnit });
-            this.logger.debug(`Successfully updated translation for key: ${key}`);
-          } else {
-            failed.push({ key, error: 'No unit returned from update' });
+            if (updatedUnit) {
+              successful.push({ key, unit: updatedUnit });
+              this.logger.debug(
+                `Successfully updated translation for key: ${key}`,
+              );
+            } else {
+              failed.push({ key, error: 'No unit returned from update' });
+            }
+          } catch (error) {
+            failed.push({ key, error: error.message });
+            this.logger.warn(
+              `Failed to update translation for key ${key}: ${error.message}`,
+            );
           }
-        } catch (error) {
-          failed.push({ key, error: error.message });
-          this.logger.warn(`Failed to update translation for key ${key}: ${error.message}`);
-        }
-      });
+        },
+      );
 
       // Wait for current chunk to complete before processing next chunk
       await Promise.allSettled(promises);
@@ -267,7 +627,9 @@ export class WeblateTranslationsService {
       failed: failed.length,
     };
 
-    this.logger.log(`Bulk update completed: ${summary.successful}/${summary.total} successful, ${summary.failed} failed`);
+    this.logger.log(
+      `Bulk update completed: ${summary.successful}/${summary.total} successful, ${summary.failed} failed`,
+    );
 
     return {
       successful,
@@ -295,9 +657,7 @@ export class WeblateTranslationsService {
         `Failed to find translations for key "${key}" in project ${projectSlug}`,
         error,
       );
-      throw new Error(
-        `Failed to find translations for key: ${error.message}`,
-      );
+      throw new Error(`Failed to find translations for key: ${error.message}`);
     }
   }
 
@@ -317,11 +677,13 @@ export class WeblateTranslationsService {
       );
 
       // Extract unique keys from the context field
-      const keys = [...new Set(
-        searchResult.results
-          .map(translation => translation.context)
-          .filter(context => context && context.trim() !== '')
-      )];
+      const keys = [
+        ...new Set(
+          searchResult.results
+            .map((translation) => translation.context)
+            .filter((context) => context && context.trim() !== ''),
+        ),
+      ];
 
       return keys.sort();
     } catch (error) {
@@ -329,9 +691,7 @@ export class WeblateTranslationsService {
         `Failed to list translation keys in project ${projectSlug}`,
         error,
       );
-      throw new Error(
-        `Failed to list translation keys: ${error.message}`,
-      );
+      throw new Error(`Failed to list translation keys: ${error.message}`);
     }
   }
 
@@ -344,11 +704,14 @@ export class WeblateTranslationsService {
     componentSlug?: string,
   ): Promise<string[]> {
     try {
-      const allKeys = await this.listTranslationKeys(projectSlug, componentSlug);
-      
+      const allKeys = await this.listTranslationKeys(
+        projectSlug,
+        componentSlug,
+      );
+
       // Filter keys that match the pattern (case-insensitive)
-      const matchingKeys = allKeys.filter(key => 
-        key.toLowerCase().includes(keyPattern.toLowerCase())
+      const matchingKeys = allKeys.filter((key) =>
+        key.toLowerCase().includes(keyPattern.toLowerCase()),
       );
 
       return matchingKeys;
@@ -357,9 +720,7 @@ export class WeblateTranslationsService {
         `Failed to search translation keys by pattern "${keyPattern}" in project ${projectSlug}`,
         error,
       );
-      throw new Error(
-        `Failed to search translation keys: ${error.message}`,
-      );
+      throw new Error(`Failed to search translation keys: ${error.message}`);
     }
   }
 
@@ -376,15 +737,19 @@ export class WeblateTranslationsService {
   ): Promise<Unit[]> {
     try {
       const client = this.weblateClientService.getClient();
-      
+
       // Build the complete search query by combining user query with scope filters
       const queryParts = [searchQuery];
       queryParts.push(`project:${projectSlug}`);
-      queryParts.push(`component:${componentSlug}`);
+      // Keep the public slug in the search filter. Nested component API paths
+      // are double-encoded for REST URLs and are not valid q filter values.
+      queryParts.push(`component:${searchValue(componentSlug)}`);
       queryParts.push(`language:${languageCode}`);
-      
+
       // Use the generated SDK with extended types to include the missing 'q' parameter
-      const options: UnitsListData & { query?: { q?: string; page_size?: number } } = {
+      const options: UnitsListData & {
+        query?: { q?: string; page_size?: number };
+      } = {
         url: '/units/',
         query: {
           q: queryParts.join(' AND '),
@@ -396,11 +761,11 @@ export class WeblateTranslationsService {
         client,
         ...options,
       });
-      
+
       if (response.error) {
         throw new Error(`API error: ${JSON.stringify(response.error)}`);
       }
-      
+
       const data = response.data as PaginatedUnitList;
       return data.results || [];
     } catch (error) {
@@ -408,10 +773,25 @@ export class WeblateTranslationsService {
         `Failed to search units with query "${searchQuery}" in ${projectSlug}/${componentSlug}/${languageCode}`,
         error,
       );
-      throw new Error(
-        `Failed to search units: ${error.message}`,
-      );
+      throw new Error(`Failed to search units: ${error.message}`);
     }
+  }
+
+  async searchUnitsWithFailingChecks(
+    projectSlug: string,
+    componentSlug: string,
+    languageCode: string,
+    checkId?: string,
+    limit = 50,
+  ): Promise<Unit[]> {
+    const query = checkId ? `check:${searchValue(checkId)}` : 'has:check';
+    return this.searchUnitsWithQuery(
+      projectSlug,
+      componentSlug,
+      languageCode,
+      query,
+      limit,
+    );
   }
 
   /**
@@ -420,39 +800,56 @@ export class WeblateTranslationsService {
    */
   private readonly PLURALIZATION_RULES = {
     // 2 forms: singular (n=1), plural (n!=1)
-    'en': { forms: 2, rule: 'n != 1' },  // English
-    'de': { forms: 2, rule: 'n != 1' },  // German
-    'es': { forms: 2, rule: 'n != 1' },  // Spanish
-    'fr': { forms: 2, rule: 'n > 1' },   // French
-    'it': { forms: 2, rule: 'n != 1' },  // Italian
-    'pt': { forms: 2, rule: 'n != 1' },  // Portuguese
-    'nl': { forms: 2, rule: 'n != 1' },  // Dutch
-    'da': { forms: 2, rule: 'n != 1' },  // Danish
-    'sv': { forms: 2, rule: 'n != 1' },  // Swedish
-    'no': { forms: 2, rule: 'n != 1' },  // Norwegian
-    
+    en: { forms: 2, rule: 'n != 1' }, // English
+    de: { forms: 2, rule: 'n != 1' }, // German
+    es: { forms: 2, rule: 'n != 1' }, // Spanish
+    fr: { forms: 2, rule: 'n > 1' }, // French
+    it: { forms: 2, rule: 'n != 1' }, // Italian
+    pt: { forms: 2, rule: 'n != 1' }, // Portuguese
+    nl: { forms: 2, rule: 'n != 1' }, // Dutch
+    da: { forms: 2, rule: 'n != 1' }, // Danish
+    sv: { forms: 2, rule: 'n != 1' }, // Swedish
+    no: { forms: 2, rule: 'n != 1' }, // Norwegian
+
     // 3 forms: one, few, many/other
-    'cs': { forms: 3, rule: '(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2' },  // Czech
-    'sk': { forms: 3, rule: '(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2' },  // Slovak
-    'pl': { forms: 3, rule: '(n==1) ? 0 : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2' },  // Polish
-    'hr': { forms: 3, rule: '(n%10==1 && n%100!=11) ? 0 : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2' },  // Croatian
-    'sr': { forms: 3, rule: '(n%10==1 && n%100!=11) ? 0 : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2' },  // Serbian
-    
+    cs: { forms: 3, rule: '(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2' }, // Czech
+    sk: { forms: 3, rule: '(n==1) ? 0 : (n>=2 && n<=4) ? 1 : 2' }, // Slovak
+    pl: {
+      forms: 3,
+      rule: '(n==1) ? 0 : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2',
+    }, // Polish
+    hr: {
+      forms: 3,
+      rule: '(n%10==1 && n%100!=11) ? 0 : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2',
+    }, // Croatian
+    sr: {
+      forms: 3,
+      rule: '(n%10==1 && n%100!=11) ? 0 : (n%10>=2 && n%10<=4 && (n%100<10 || n%100>=20)) ? 1 : 2',
+    }, // Serbian
+
     // 4 forms: one, few, many, other
-    'sl': { forms: 4, rule: '(n%100==1) ? 0 : (n%100==2) ? 1 : (n%100==3 || n%100==4) ? 2 : 3' },  // Slovenian
-    
+    sl: {
+      forms: 4,
+      rule: '(n%100==1) ? 0 : (n%100==2) ? 1 : (n%100==3 || n%100==4) ? 2 : 3',
+    }, // Slovenian
+
     // 6 forms: zero, one, two, few, many, other
-    'ar': { forms: 6, rule: '(n==0) ? 0 : (n==1) ? 1 : (n==2) ? 2 : (n%100>=3 && n%100<=10) ? 3 : (n%100>=11) ? 4 : 5' },  // Arabic
-    
+    ar: {
+      forms: 6,
+      rule: '(n==0) ? 0 : (n==1) ? 1 : (n==2) ? 2 : (n%100>=3 && n%100<=10) ? 3 : (n%100>=11) ? 4 : 5',
+    }, // Arabic
+
     // Default fallback for unknown languages
-    'default': { forms: 2, rule: 'n != 1' }
+    default: { forms: 2, rule: 'n != 1' },
   };
 
   /**
    * Get the expected number of plural forms for a language
    */
   private getExpectedPluralForms(languageCode: string): number {
-    const langRule = this.PLURALIZATION_RULES[languageCode] || this.PLURALIZATION_RULES['default'];
+    const langRule =
+      this.PLURALIZATION_RULES[languageCode] ||
+      this.PLURALIZATION_RULES['default'];
     return langRule.forms;
   }
 
@@ -460,7 +857,11 @@ export class WeblateTranslationsService {
    * Parse plural forms from a concatenated string into an array
    * Uses language-specific pluralization rules to determine expected number of forms
    */
-  private parsePluralForms(value: string, sourceArray: Array<string>, languageCode: string): Array<string> {
+  private parsePluralForms(
+    value: string,
+    sourceArray: Array<string>,
+    languageCode: string,
+  ): Array<string> {
     // If source is not an array or has only one element, treat as singular
     if (!Array.isArray(sourceArray) || sourceArray.length <= 1) {
       return [value];
@@ -468,20 +869,22 @@ export class WeblateTranslationsService {
 
     // Get expected plural forms count based on language rules
     const expectedPluralCount = this.getExpectedPluralForms(languageCode);
-    
+
     // Fallback to source array length if it's different (might be source language specific)
     const targetPluralCount = Math.max(expectedPluralCount, sourceArray.length);
-    
+
     // For plural forms, split on the pattern where %d starts a new plural form
     // This handles cases like "%d day%d days" -> ["%d day", "%d days"]
     // Or "%d účastník%d účastníci%d účastníkov" -> ["%d účastník", "%d účastníci", "%d účastníkov"]
-    
+
     // Enhanced splitting logic that handles various separators and patterns
     let parts: string[] = [];
-    
+
     // Method 1: Split by %d pattern (most common)
-    const percentDParts = value.split(/(?=%d)/g).filter(part => part.length > 0);
-    
+    const percentDParts = value
+      .split(/(?=%d)/g)
+      .filter((part) => part.length > 0);
+
     if (percentDParts.length === targetPluralCount) {
       parts = percentDParts;
     } else if (percentDParts.length > 1) {
@@ -496,11 +899,14 @@ export class WeblateTranslationsService {
       }
     } else {
       // Method 3: Alternative splitting strategies for edge cases
-      
+
       // Try splitting by common word boundaries in some languages
-      const wordBoundaryPattern = /(?<=%d\s+[^\s%]+)(?=\s*%d)|(?<=%d[^\s%]+)(?=%d)/g;
-      const wordParts = value.split(wordBoundaryPattern).filter(part => part.length > 0);
-      
+      const wordBoundaryPattern =
+        /(?<=%d\s+[^\s%]+)(?=\s*%d)|(?<=%d[^\s%]+)(?=%d)/g;
+      const wordParts = value
+        .split(wordBoundaryPattern)
+        .filter((part) => part.length > 0);
+
       if (wordParts.length === targetPluralCount) {
         parts = wordParts;
       } else {
@@ -509,28 +915,29 @@ export class WeblateTranslationsService {
         parts = [];
         for (let i = 0; i < targetPluralCount; i++) {
           const start = i * avgLength;
-          const end = i === targetPluralCount - 1 ? value.length : (i + 1) * avgLength;
+          const end =
+            i === targetPluralCount - 1 ? value.length : (i + 1) * avgLength;
           parts.push(value.substring(start, end));
         }
       }
     }
-    
+
     // Ensure we have the correct number of parts
     while (parts.length < targetPluralCount) {
       parts.push(''); // Pad with empty strings if needed
     }
-    
+
     // Trim excess parts if we have too many
     if (parts.length > targetPluralCount) {
       parts = parts.slice(0, targetPluralCount);
     }
-    
+
     // Clean up parts - remove empty ones except if that would reduce count below minimum
-    const cleanedParts = parts.filter(part => part.trim().length > 0);
+    const cleanedParts = parts.filter((part) => part.trim().length > 0);
     if (cleanedParts.length >= targetPluralCount) {
       return cleanedParts.slice(0, targetPluralCount);
     }
-    
+
     return parts;
   }
-} 
+}
